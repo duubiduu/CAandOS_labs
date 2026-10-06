@@ -5,7 +5,7 @@ if [ "$1" != "--in-ns" ]; then
     exit $?
 fi
 
-MAIN_SCRIPT="$(pwd)/main.sh"
+MAIN_SCRIPT="$(pwd)/script1.sh"
 TEST_DIR="$(pwd)/test_env"
 MNT_DIR="$TEST_DIR/mnt"
 LOG_DIR="$MNT_DIR/log"
