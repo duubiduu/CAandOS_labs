@@ -21,104 +21,105 @@ setup_env() {
     mkdir -p "$BACKUP_DIR"
 }
 
-generate_files() {
-    local count=${1:-6}
-    echo "       -> Генерируем $(($count * 100)) MB логов..."
-    
-    for i in $(seq "$count" -1 1); do
-        head -c 100M /dev/zero > "$LOG_DIR/file_$i.log"
-        day=$(printf "%02d" $((30 - i)))
-        touch -t "202401${day}1200" "$LOG_DIR/file_$i.log"
-    done
-}
-
 teardown_env() {
     umount "$MNT_DIR" 2>/dev/null
     rm -rf "$TEST_DIR"
 }
 
 if [ ! -f "$MAIN_SCRIPT" ]; then
-    echo "[ОШИБКА] Скрипт $MAIN_SCRIPT не найден!"
+    echo -e "[ОШИБКА] Скрипт $MAIN_SCRIPT не найден!"
     exit 1
 fi
 
-echo -e "\nТЕСТ 1: Базовое срабатывание (Порог превышен)"
-setup_env "800m"
-generate_files 6
-$MAIN_SCRIPT "$LOG_DIR" 70 "$BACKUP_DIR"
-if ls "$BACKUP_DIR"/*.tar.gz 1> /dev/null 2>&1; then
-    echo "  [OK] Архив успешно создан."
-else
-    echo "  [FAIL] Архив не найден!"
-fi
-teardown_env
-
-echo -e "\nТЕСТ 2: Порог НЕ превышен"
-setup_env "800m"
-generate_files 6
-$MAIN_SCRIPT "$LOG_DIR" 90 "$BACKUP_DIR"
-if [ -z "$(ls -A "$BACKUP_DIR")" ]; then
-    echo "  [OK] Папка backup осталась пустой."
-else
-    echo "  [FAIL] Скрипт создал архив, хотя не должен был!"
-fi
-teardown_env
-
-echo -e "\nТЕСТ 3: Фильтрация по дате (самые старые)"
-setup_env "800m"
-generate_files 6
-$MAIN_SCRIPT "$LOG_DIR" 50 "$BACKUP_DIR"
-if [ ! -f "$LOG_DIR/file_6.log" ] && [ -f "$LOG_DIR/file_1.log" ]; then
-    echo "  [OK] Самые старые файлы удалены, новые остались."
-else
-    echo "  [FAIL] Ошибка фильтрации по дате!"
-fi
-teardown_env
-
-echo -e "\nТЕСТ 4: Сжатие LZMA (LAB1_MAX_COMPRESSION=1)"
-setup_env "800m"
-generate_files 6
-export LAB1_MAX_COMPRESSION=1
-$MAIN_SCRIPT "$LOG_DIR" 70 "$BACKUP_DIR"
-unset LAB1_MAX_COMPRESSION
-if ls "$BACKUP_DIR"/*.xz 1> /dev/null 2>&1; then
-    echo "  [OK] Архив LZMA (.tar.xz) успешно создан!"
-else
-    echo "  [FAIL] Архив .tar.xz не найден."
-fi
-teardown_env
-
-echo -e "\nТЕСТ 5: Точное совпадение порога (Граничный тест)"
-setup_env "800m"
-generate_files 6
-$MAIN_SCRIPT "$LOG_DIR" 75 "$BACKUP_DIR"
-if [ -z "$(ls -A "$BACKUP_DIR")" ]; then
-    echo "  [OK] При точном совпадении (75%) архивация не запустилась."
-else
-    echo "  [FAIL] Скрипт сработал при точном совпадении!"
-fi
-teardown_env
-
-echo -e "\nТЕСТ 6: Отсутствие прав или файлов (Безопасность)"
-setup_env "800m"
-$MAIN_SCRIPT "$LOG_DIR" 70 "$BACKUP_DIR" > /dev/null
-if [ $? -eq 0 ]; then
-    echo "  [OK] Скрипт корректно обработал пустую папку."
-else
-    echo "  [FAIL] Скрипт упал с ошибкой!"
-fi
-teardown_env
-
-echo -e "\nТЕСТ 7: Умная остановка удаления"
+echo -e "[ТЕСТ 1] Папка заполнена на 40% при пороге 50%"
 setup_env "1000m"
-generate_files 8
-$MAIN_SCRIPT "$LOG_DIR" 60 "$BACKUP_DIR"
-remaining_files=$(ls -1 "$LOG_DIR" | wc -l)
-if [ "$remaining_files" -eq 5 ]; then
-    echo "  [OK] Скрипт остановился вовремя! Осталось файлов: $remaining_files (ожидалось 5)."
+head -c 200M /dev/zero > "$LOG_DIR/file_old.log"
+head -c 200M /dev/zero > "$LOG_DIR/file_new.log"
+touch -t "202401011200" "$LOG_DIR/file_old.log"
+
+$MAIN_SCRIPT "$LOG_DIR" 50 "$BACKUP_DIR"
+
+if [ -z "$(ls -A "$BACKUP_DIR")" ] && [ $(ls -1 "$LOG_DIR" | wc -l) -eq 2 ]; then
+    echo -e "  Тест пройден. Алгоритм верно проигнорировал папку и сохранил файлы"
 else
-    echo "  [FAIL] Ожидалось 5 файлов, но осталось $remaining_files!"
+    echo -e "  Ошибка! Запустилась очистка, хотя переполнения нет"
 fi
 teardown_env
 
-echo -e "\n[INFO] Все тесты завершены!"
+echo -e "[ТЕСТ 2] Превышение лимита на 80 Мб. Жадный алгоритм должен удалить строго 1 старый файл"
+setup_env "600m"
+head -c 150M /dev/zero > "$LOG_DIR/file_1_old.log"
+head -c 350M /dev/zero > "$LOG_DIR/file_2_new.log"
+touch -t "202401011200" "$LOG_DIR/file_1_old.log"
+touch -t "202401021200" "$LOG_DIR/file_2_new.log"
+
+$MAIN_SCRIPT "$LOG_DIR" 70 "$BACKUP_DIR"
+
+if [ ! -f "$LOG_DIR/file_1_old.log" ] && [ -f "$LOG_DIR/file_2_new.log" ]; then
+    echo -e "  [OK] Тест пройден! Умная остановка: удален только 1 старый файл, новый на 350Мб спасен"
+else
+    echo -e "  [FAIL] Ошибка жадного алгоритма отбора!"
+fi
+teardown_env
+
+echo -e "[ТЕСТ 3] Каскадный набор: для устранения перебора требуется накопление 3-х файлов"
+setup_env "500m"
+head -c 90M /dev/zero > "$LOG_DIR/log_old_A.log"
+head -c 90M /dev/zero > "$LOG_DIR/log_old_B.log"
+head -c 90M /dev/zero > "$LOG_DIR/log_old_C.log"
+head -c 180M /dev/zero > "$LOG_DIR/log_new_D.log"
+touch -t "202401011200" "$LOG_DIR/log_old_A.log"
+touch -t "202401011300" "$LOG_DIR/log_old_B.log"
+touch -t "202401011400" "$LOG_DIR/log_old_C.log"
+touch -t "202401021200" "$LOG_DIR/log_new_D.log"
+
+$MAIN_SCRIPT "$LOG_DIR" 40 "$BACKUP_DIR"
+
+if [ $(ls -1 "$LOG_DIR" | wc -l) -eq 1 ] && [ -f "$LOG_DIR/log_new_D.log" ]; then
+    echo -e "  [OK] Тест пройден! Алгоритм успешно накопил веса из 3-х файлов и очистил дельту"
+else
+    echo -e "  [FAIL] Ошибка каскадного накопления веса!"
+fi
+teardown_env
+
+echo -e "[ТЕСТ 4] Максимальное компрессионное сжатие (LAB1_MAX_COMPRESSION=1)"
+setup_env "600m"
+head -c 200M /dev/zero > "$LOG_DIR/heavy_old.log"
+head -c 250M /dev/zero > "$LOG_DIR/heavy_new.log"
+touch -t "202401011200" "$LOG_DIR/heavy_old.log"
+
+export LAB1_MAX_COMPRESSION=1
+$MAIN_SCRIPT "$LOG_DIR" 50 "$BACKUP_DIR"
+unset LAB1_MAX_COMPRESSION
+
+if ls "$BACKUP_DIR"/*.xz 1> /dev/null 2>&1; then
+    echo -e "  [OK] Тест пройден! Создан высокоплотный архив формата .tar.xz (LZMA)"
+else
+    echo -e "  [FAIL] Ошибка! Бонусный архив .tar.xz не обнаружен"
+fi
+teardown_env
+
+echo -e "[ТЕСТ 5] Граничный случай: Занято ровно 70% при лимите 70%"
+setup_env "1000m"
+head -c 400M /dev/zero > "$LOG_DIR/border_1.log"
+head -c 300M /dev/zero > "$LOG_DIR/border_2.log"
+
+$MAIN_SCRIPT "$LOG_DIR" 70 "$BACKUP_DIR"
+
+if [ -z "$(ls -A "$BACKUP_DIR")" ]; then
+    echo -e "  [OK] Тест пройден! Точное совпадение не вызвало ложной очистки"
+else
+    echo -e "  [FAIL] Ошибка! Скрипт сработал при равенстве, нарушая условие '-gt'"
+fi
+teardown_env
+
+echo -e "[ТЕСТ 6] Проверка надежности кода: Сканирование абсолютно пустой папки логов"
+setup_env "500m"
+
+$MAIN_SCRIPT "$LOG_DIR" 20 "$BACKUP_DIR" > /dev/null
+if [ $? -eq 0 ]; then
+    echo -e "  [OK] Тест пройден! Скрипт корректно обработал отсутствие файлов"
+else
+    echo -e "  [FAIL] Критический сбой: скрипт упал при анализе пустой папки!"
+fi
+teardown_env
